@@ -8,8 +8,8 @@ import (
 )
 
 type GobCodec struct {
-	conn io.ReadWriteCloser
-	buf  *bufio.Writer // prevent block
+	conn io.ReadWriteCloser //tcp socket connection
+	buf  *bufio.Writer // writer with buffer
 	dec  *gob.Decoder
 	enc  *gob.Encoder
 }
@@ -35,6 +35,7 @@ func (c *GobCodec) ReadBody(body interface{}) error {
 }
 
 func (c *GobCodec) Write(h *Header, body interface{}) (err error) {
+	// write header and body
 	defer func() {
 		_ = c.buf.Flush()
 		if err != nil {

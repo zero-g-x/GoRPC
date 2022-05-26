@@ -4,21 +4,19 @@ import (
 	"GoRPC/codec"
 	"encoding/json"
 	"fmt"
-	"gorpc/codec"
 	"io"
 	"log"
 	"net"
 	"reflect"
 	"sync"
-
-	"github.com/ugorji/go/codec"
 )
 
 const MagicNumber = 0x76543
 
+// code format:json
 type Option struct{
-	MagicNumber int
-	CodecType codec.Type
+	MagicNumber int //marks it's a rpc request
+	CodecType codec.Type // format of header and body
 }
 
 var DefaultOption = &Option{
@@ -34,6 +32,7 @@ func NewServer() *Server{
 
 var DefaultServer=NewServer()
 
+//accept connections on the listener and serves requests
 func (server *Server)Accept(lis net.Listener){
 	for{
 		conn,err := lis.Accept()
@@ -61,12 +60,12 @@ func (s *Server)ServeConn(conn io.ReadWriteCloser){
 		log.Println("rpc server: invalid magic number %x",opt.MagicNumber)
 		return 
 	}
-	f := codec.NewCodecFuncMap[opt.CodecType]
-	if f==nil{
+	newCoderc := codec.NewCodecFuncMap[opt.CodecType]
+	if newCoderc==nil{
 		log.Println("rpc server: invalid codec type %s",opt.CodecType)
 		return
 	}
-	cc := f(conn)
+	cc := newCoderc(conn)
 	s.serveCodec(cc)
 }
 
@@ -80,7 +79,8 @@ func (server *Server)serveCodec(cc codec.Codec){
 				break//close connection
 			}
 			req.h.Error = err.Error()
-			server.sendResponse(cc,req.h,invalidRequest,sending)
+			msg := "invalid Request"
+			server.sendResponse(cc,req.h,msg,sending)
 			continue
 		}
 		wg.Add(1)
@@ -90,6 +90,7 @@ func (server *Server)serveCodec(cc codec.Codec){
 	_ = cc.Close()
 }
 
+//store unformation of a call
 type request struct{
 	h *codec.Header
 	argv,replyv reflect.Value
@@ -121,8 +122,7 @@ func (server *Server) readRequest(cc codec.Codec)(*request,error){
 	return req,nil
 }
 
-func (server *Server)sendResponse
-		(cc codec.Codec,h *codec.Header,body interface{},sending *sync.Mutex){
+func (server *Server)sendResponse(cc codec.Codec,h *codec.Header,body interface{},sending *sync.Mutex){
 	sending.Lock()
 	defer sending.Unlock()
 	if err:=cc.Write(h,body);err!=nil{
