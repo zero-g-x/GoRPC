@@ -7,12 +7,13 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"sync"
 	"time"
 )
 
 //simple client
 func startServer(addr chan string){
-	listen,err := net.Listen("tcp",":8080")
+	listen,err := net.Listen("tcp",":0")
 	if err!=nil{
 		log.Fatal("network error: ",err)
 	}
@@ -21,7 +22,7 @@ func startServer(addr chan string){
 	gorpc.Accept(listen)
 }
 
-func main(){
+func simpleClient(){
 	addr := make(chan string)
 	go startServer(addr)
 
@@ -45,5 +46,32 @@ func main(){
 		log.Println("reply:",reply)
 		
 	}
+}
 
+func clientTest(){
+	log.SetFlags(0)
+	addr:=make(chan string)
+	go startServer(addr)
+	client,_:=gorpc.Dial("tcp",<-addr)
+	defer func(){_=client.Close()}()
+
+	time.Sleep(time.Second)
+
+	var wg sync.WaitGroup
+	for i:=0;i<5;i++{
+		wg.Add(1)
+		go func(i int){
+			defer wg.Done()
+			args:=fmt.Sprintf("this is client rpc request %d ",i)
+			var reply string 
+			if err:=client.Call("clientTest",args,&reply);err!=nil{
+				log.Fatal("client call error ",err)
+			}
+			log.Println("receive reply: ",reply)
+		}(i)
+	}
+	wg.Wait()
+}
+func main(){
+	clientTest()
 }
