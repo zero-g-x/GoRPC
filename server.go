@@ -3,12 +3,15 @@ package gorpc
 import (
 	"GoRPC/codec"
 	"encoding/json"
-	"fmt"
+	"errors"
+	"go/ast"
 	"io"
 	"log"
 	"net"
 	"reflect"
+	"strings"
 	"sync"
+	"sync/atomic"
 )
 
 const MagicNumber = 0x76543
@@ -24,7 +27,45 @@ var DefaultOption = &Option{
 	CodecType: codec.GobType,
 }
 
-type Server struct{}
+type Server struct{
+	serviceMap sync.Map
+}
+
+func (server *Server)Register(ins interface{})error{
+	s:=newService(ins)
+	if _,dup:=server.serviceMap.LoadOrStore(s.name,s);dup{
+		return errors.New("service "+s.name+" alreaady defined")
+	}
+	return nil
+}
+
+func Register(ins interface{})error{
+	return DefaultServer.Register(ins)
+}
+
+func (server *Server) findService(serviceMethod string)(*service, *methodType, error){
+	var svc *service
+	var mType *methodType
+	var err error
+	dot:=strings.LastIndex(serviceMethod,".")
+	if dot<0{
+		err=errors.New("invalid serviceMethod: "+serviceMethod)
+		return svc,mType,err
+	}
+	serviceName,methodName:=serviceMethod[0:dot],serviceMethod[dot+1:]
+	serviceIns,ok:=server.serviceMap.Load(serviceName)
+	if !ok{
+		err=errors.New("service "+serviceName+" not found")
+		return svc,mType,err
+	}
+	svc=serviceIns.(*service)
+	mType=svc.methods[methodName]
+	//log.Println("methodType in findService=",mType)
+	if mType==nil{
+		err=errors.New("method "+methodName+" not found")
+	}
+	return svc,mType,err
+} 
 
 func NewServer() *Server{
 	return &Server{}
@@ -94,6 +135,8 @@ func (server *Server)serveCodec(cc codec.Codec){
 type request struct{
 	h *codec.Header
 	argv,replyv reflect.Value
+	mType *methodType
+	svc *service//service of request
 }
 
 func (server *Server) readRequestHeader(cc codec.Codec)(*codec.Header,error){
@@ -115,9 +158,24 @@ func (server *Server) readRequest(cc codec.Codec)(*request,error){
 	req:=&request{
 		h: h,
 	}
-	req.argv=reflect.New(reflect.TypeOf(""))
-	if err=cc.ReadBody(req.argv.Interface());err!=nil{
+	//log.Println("h.ServiceMethod=",h.ServiceMethod)
+	req.svc,req.mType,err=server.findService(h.ServiceMethod)
+	//log.Println("svc= ",req.svc,",mType=",req.mType)
+	if err!=nil{
+		return req,err
+	}
+
+	req.argv=req.mType.newArgv()
+	req.replyv=req.mType.newReplyv()
+
+	argvi:=req.argv.Interface()
+	//argvi should be a pointer
+	if req.argv.Type().Kind()!=reflect.Ptr{
+		argvi=req.argv.Addr().Interface() 
+	}
+	if err=cc.ReadBody(argvi);err!=nil{
 		log.Println("rpc server: read argv error: ",err)
+		return req,err
 	}
 	return req,nil
 }
@@ -130,10 +188,112 @@ func (server *Server)sendResponse(cc codec.Codec,h *codec.Header,body interface{
 	}
 }
 
-func (server *Server) handleRequest(cc codec.Codec,req *request,sending *sync.Mutex,wg *sync.WaitGroup){
+
+
+func (server *Server) handleRequest(cc codec.Codec,req *request,sendmu *sync.Mutex,wg *sync.WaitGroup){
 
 	defer wg.Done()
-	log.Println(req.h,req.argv.Elem())
-	req.replyv=reflect.ValueOf(fmt.Sprintf("rpc resp %d",req.h.Seq))
-	server.sendResponse(cc,req.h,req.replyv.Interface(),sending)
+	//log.Println(req.h,req.argv.Elem())
+	//req.replyv=reflect.ValueOf(fmt.Sprintf("rpc resp %d",req.h.Seq))
+	err:=req.svc.call(req.mType,req.argv,req.replyv)
+	if err!=nil{
+		req.h.Error=err.Error()
+		invalidRequest:="request is not valid"
+		server.sendResponse(cc,req.h,invalidRequest,sendmu)
+	}
+	server.sendResponse(cc,req.h,req.replyv.Interface(),sendmu)
+}
+
+
+
+type methodType struct{
+	method reflect.Method
+	ArgType reflect.Type
+	ReplyType reflect.Type
+	numCalls uint64
+}
+
+func (mt *methodType) NumCalls() uint64{
+	return atomic.LoadUint64(&mt.numCalls)
+}
+
+func (mt *methodType) newArgv()  ( reflect.Value){
+	var argv reflect.Value
+	//log.Println("method type=",mt)
+	if mt.ArgType.Kind()==reflect.Ptr{
+		argv=reflect.New(mt.ArgType.Elem())
+	}else{
+		argv=reflect.New(mt.ArgType).Elem()
+	}
+	return argv
+}
+
+func (mt *methodType) newReplyv() ( reflect.Value){
+	replyv:=reflect.New(mt.ReplyType.Elem())
+	switch mt.ReplyType.Elem().Kind(){
+	case reflect.Map:
+		replyv.Elem().Set(reflect.MakeMap(mt.ReplyType.Elem()))
+	case reflect.Slice:
+		replyv.Elem().Set(reflect.MakeSlice(mt.ReplyType.Elem(),0,0))
+	}
+	return replyv
+}
+
+type service struct{
+	name string //name of struct
+	typ reflect.Type 
+	ins reflect.Value//instance of struct
+	methods map[string]*methodType
+}
+
+func invalidTypeName(t reflect.Type) bool{
+	return !(ast.IsExported(t.Name())||t.PkgPath()=="")
+}
+
+func (s *service) registerMethods(){
+	s.methods=make(map[string]*methodType)
+	for i:=0;i<s.typ.NumMethod();i++{
+		method:=s.typ.Method(i)
+		//method(serviceName,arg,reply)
+		mType:=method.Type
+		if mType.NumIn()!=3 || mType.NumOut()!=1{
+			continue//?
+		}
+		if mType.Out(0)!=reflect.TypeOf((*error)(nil)).Elem(){
+			continue
+		}
+		argType,replyType:=mType.In(1),mType.In(2)
+		if invalidTypeName(argType)||invalidTypeName(replyType){
+			continue
+		}
+		s.methods[method.Name]=&methodType{
+			method: method,
+			ArgType: argType,
+			ReplyType: replyType,
+		}
+		log.Println("server regerster method: ",s.name,".",method.Name,"method type=",s.methods[method.Name])
+	}
+}
+
+func newService(ins interface{})( *service){
+	s:=&service{}
+	s.ins=reflect.ValueOf(ins)
+	s.name=reflect.Indirect(s.ins).Type().Name()
+	s.typ=reflect.TypeOf(ins)
+	if !ast.IsExported(s.name){
+		log.Fatalf("rpc server :%s is not an exported service name",s.name)
+	}
+	s.registerMethods()
+	return s
+}
+
+func (s *service)call(mt *methodType,argv,replyv reflect.Value)error{
+	atomic.AddUint64(&mt.numCalls,1)
+	f := mt.method.Func
+	returnV:=f.Call([]reflect.Value{s.ins,argv,replyv})
+	intf:=returnV[0].Interface()
+	if intf!=nil{
+		return intf.(error)
+	}
+	return nil
 }

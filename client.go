@@ -228,9 +228,9 @@ func (client *Client) Go(serviceMethod string, args interface{}, reply interface
 		Reply:         reply,
 		Done:          done,
 	}
-
+	//log.Println(" client send call")
 	client.send(call)
-	//log.Println("in client call")
+	//
 	return call
 }
 
