@@ -4,6 +4,7 @@ import (
 	"GoRPC/codec"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"go/ast"
 	"io"
 	"log"
@@ -12,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 const MagicNumber = 0x76543
@@ -20,11 +22,14 @@ const MagicNumber = 0x76543
 type Option struct{
 	MagicNumber int //marks it's a rpc request
 	CodecType codec.Type // format of header and body
+	ConnectTimeout time.Duration
+	HandleTimeout time.Duration
 }
 
 var DefaultOption = &Option{
 	MagicNumber: MagicNumber,
 	CodecType: codec.GobType,
+	ConnectTimeout: time.Second*10,
 }
 
 type Server struct{
@@ -98,12 +103,12 @@ func (s *Server)ServeConn(conn io.ReadWriteCloser){
 		return 
 	}
 	if opt.MagicNumber!=MagicNumber{
-		log.Println("rpc server: invalid magic number %x",opt.MagicNumber)
+		log.Println("rpc server: invalid magic number ",opt.MagicNumber)
 		return 
 	}
 	newCoderc := codec.NewCodecFuncMap[opt.CodecType]
 	if newCoderc==nil{
-		log.Println("rpc server: invalid codec type %s",opt.CodecType)
+		log.Println("rpc server: invalid codec type ",opt.CodecType)
 		return
 	}
 	cc := newCoderc(conn)
@@ -125,7 +130,7 @@ func (server *Server)serveCodec(cc codec.Codec){
 			continue
 		}
 		wg.Add(1)
-		go server.handleRequest(cc,req,sending,wg)
+		go server.handleRequest(cc,req,sending,wg,DefaultOption.HandleTimeout)
 	}
 	wg.Wait()
 	_ = cc.Close()
@@ -190,18 +195,44 @@ func (server *Server)sendResponse(cc codec.Codec,h *codec.Header,body interface{
 
 
 
-func (server *Server) handleRequest(cc codec.Codec,req *request,sendmu *sync.Mutex,wg *sync.WaitGroup){
+func (server *Server) handleRequest(cc codec.Codec,req *request,sendmu *sync.Mutex,wg *sync.WaitGroup,timeout time.Duration){
 
 	defer wg.Done()
 	//log.Println(req.h,req.argv.Elem())
 	//req.replyv=reflect.ValueOf(fmt.Sprintf("rpc resp %d",req.h.Seq))
-	err:=req.svc.call(req.mType,req.argv,req.replyv)
-	if err!=nil{
-		req.h.Error=err.Error()
-		invalidRequest:="request is not valid"
-		server.sendResponse(cc,req.h,invalidRequest,sendmu)
+
+	//chans for service call and send response
+	calledChan:=make(chan struct{})
+	sentChan:=make(chan struct{})
+	invalidRequest:="request is not valid"
+	go func(){
+		err:=req.svc.call(req.mType,req.argv,req.replyv)
+		calledChan<-struct{}{}
+		if err!=nil{
+			req.h.Error=err.Error()
+			server.sendResponse(cc,req.h,invalidRequest,sendmu)
+			sentChan<-struct{}{}
+			return 
+		}
+		server.sendResponse(cc,req.h,req.replyv.Interface(),sendmu)
+		sentChan<-struct{}{}
+	}()
+	
+	if timeout<=0{
+		<-calledChan
+		<-sentChan
+		return
 	}
-	server.sendResponse(cc,req.h,req.replyv.Interface(),sendmu)
+	
+	select{
+	case <-time.After(timeout):
+		//todo: race condition,how to kill that goroutine
+		req.h.Error=fmt.Sprintln("server handle request timeout within ",timeout)
+		server.sendResponse(cc,req.h,invalidRequest,sendmu)
+	case <-calledChan:
+		<-sentChan
+	}
+
 }
 
 

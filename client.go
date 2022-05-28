@@ -2,6 +2,7 @@ package gorpc
 
 import (
 	"GoRPC/codec"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"log"
 	"net"
 	"sync"
+	"time"
 )
 
 type Call struct {
@@ -36,6 +38,13 @@ type Client struct {
 	closing      bool //client call close
 	shutdown     bool //server shut down
 }
+
+type clientResult struct{
+	client *Client
+	err error
+}
+
+type newClientFunc func(conn net.Conn,opt *Option)(*Client,error)
 
 var ErrShutDone = errors.New("Connection shut down")
 
@@ -175,18 +184,56 @@ func parseOption(opts ...*Option) (*Option, error) {
 
 //connects to server
 func Dial(network, address string, opts ...*Option) (client *Client, err error) {
-	opt, err := parseOption(opts...)
-	if err != nil {
-		return nil, err
-	}
-	conn, err := net.Dial(network, address)
-	client, err = NewClient(conn, opt)
+	// opt, err := parseOption(opts...)
+	// if err != nil {
+	// 	return nil, err
+	// }
+	// conn, err := net.Dial(network, address)
+	// client, err = NewClient(conn, opt)
 
-	if client == nil {
-		_ = conn.Close()
+	// if client == nil {
+	// 	_ = conn.Close()
+	// }
+	// fmt.Println("dial")
+	return dialTimeOut(NewClient,network,address,opts...)
+}
+
+func dialTimeOut(f newClientFunc,network,address string,opts ...*Option)(*Client,error){
+	
+	opt,err:=parseOption(opts...)
+	if err!=nil{
+		log.Println("client dialTimeout err, parse option failed: ",err)
+		return nil,err
 	}
-	fmt.Println("dial")
-	return
+	var conn net.Conn
+	if opt.ConnectTimeout<=0{
+		conn,err=net.Dial(network,address)
+	}else{
+		conn,err=net.DialTimeout(network,address,opt.ConnectTimeout)
+	}
+	defer func(){
+		if err!=nil{
+			_=conn.Close()//close connection if error
+		}
+	}()
+	
+	ch:=make(chan clientResult)
+	go func(){
+		client,err:=f(conn,opt)
+		ch<-clientResult{
+			client: client,
+			err: err,
+		}
+	}()
+	
+	select{
+	case <-time.After(opt.ConnectTimeout):
+		log.Println("client connect dial timeout within ",opt.ConnectTimeout)
+		return nil,fmt.Errorf("client connect dial timeout within %s ",opt.ConnectTimeout)
+	case result:=<-ch:
+		return result.client,result.err
+	}
+
 }
 
 func (client *Client) send(call *Call) {
@@ -237,8 +284,30 @@ func (client *Client) Go(serviceMethod string, args interface{}, reply interface
 func (client *Client) Call(serviceMethod string, args interface{}, reply interface{}) error {
 
 	call := <-client.Go(serviceMethod, args, reply, make(chan *Call, 1)).Done
+	return call.Error	
 	//block until call is done
 	//fmt.Println("args:",call.Args,",reply:",call.Reply)
+	// call:=client.Go(serviceMethod,args,reply,make(chan *Call,1))
+	// select{
+	// case <-ctx.Done():
+	// 	client.removeCall(call.Seq)
+	// 	return errors.New("client call timeout "+ctx.Err().Error())
+	// case call=<-call.Done:
+	// 	return call.Error
+	// }
+}
 
-	return call.Error
+func (client *Client) CallWithTimeout(ctx context.Context,serviceMethod string, args interface{}, reply interface{}) error {
+
+	//call := <-client.Go(serviceMethod, args, reply, make(chan *Call, 1)).Done
+	//block until call is done
+	//fmt.Println("args:",call.Args,",reply:",call.Reply)
+	call:=client.Go(serviceMethod,args,reply,make(chan *Call,1))
+	select{
+	case <-ctx.Done():
+		client.removeCall(call.Seq)
+		return errors.New("client call timeout "+ctx.Err().Error())
+	case call=<-call.Done:
+		return call.Error
+	}
 }
