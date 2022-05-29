@@ -208,8 +208,10 @@ func dialTimeOut(f newClientFunc,network,address string,opts ...*Option)(*Client
 	var conn net.Conn
 	if opt.ConnectTimeout<=0{
 		conn,err=net.Dial(network,address)
+		//log.Println("dial without timeout")
 	}else{
 		conn,err=net.DialTimeout(network,address,opt.ConnectTimeout)
+		//log.Println("dial with timeout")
 	}
 	defer func(){
 		if err!=nil{
@@ -237,6 +239,7 @@ func dialTimeOut(f newClientFunc,network,address string,opts ...*Option)(*Client
 }
 
 func (client *Client) send(call *Call) {
+	log.Println("client ",client ," send call")
 	client.sendmu.Lock()
 	defer client.sendmu.Unlock()
 	//register call

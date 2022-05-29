@@ -3,6 +3,7 @@ package main
 import (
 	gorpc "GoRPC"
 	"GoRPC/codec"
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -99,8 +100,9 @@ func serviceTest() {
 		go func(i int) {
 			defer wg.Done()
 			args := &Args{Num1: i, Num2: i * i}
+			ctx,_:=context.WithTimeout(context.Background(),time.Second)
 			var reply int
-			if err := client.Call("Foo.Sum", args, &reply); err != nil {
+			if err := client.CallWithTimeout(ctx,"Foo.Sum", args, &reply); err != nil {
 				log.Println("call Foo.Sum error: ", err)
 			}
 			log.Println("args: ", args.Num1, ",", args.Num2, ",reply:", reply)
