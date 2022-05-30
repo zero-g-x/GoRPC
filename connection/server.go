@@ -1,4 +1,4 @@
-package gorpc
+package connection
 
 import (
 	"GoRPC/codec"
@@ -328,3 +328,5 @@ func (s *service)call(mt *methodType,argv,replyv reflect.Value)error{
 	}
 	return nil
 }
+
+

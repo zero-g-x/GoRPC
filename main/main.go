@@ -1,7 +1,7 @@
 package main
 
 import (
-	gorpc "GoRPC"
+	gorpc "GoRPC/connection"
 	"GoRPC/codec"
 	"context"
 	"encoding/json"

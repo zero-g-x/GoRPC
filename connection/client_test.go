@@ -1,4 +1,4 @@
-package gorpc
+package connection
 
 import (
 	"context"
